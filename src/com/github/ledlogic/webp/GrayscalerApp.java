@@ -5,9 +5,9 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
-public class WebpConverterApp {
+public class GrayscalerApp {
 	
-	private static WebpFilenameFilter filter = new WebpFilenameFilter();
+	private static PngFilenameFilter filter = new PngFilenameFilter();
 	
 	public static void main(String[] args) throws IOException, InterruptedException {
 		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller Solomani Rim\\04-Ludmilla\\Art";
@@ -27,7 +27,7 @@ public class WebpConverterApp {
 			String inPath = attackFolder + "\\" + inputFile;
 			String outPath = attackFolder + "\\" + outputFile;
 			
-			WebpConverterService.convertWebFile(inPath, outPath);
+			GrayScalerService.convertWebFile(inPath, outPath);
 		}
 	}
 }
