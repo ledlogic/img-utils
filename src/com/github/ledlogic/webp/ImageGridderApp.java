@@ -38,21 +38,23 @@ public class ImageGridderApp {
 		// sort
 		Collections.sort(names);
 
-		int dim = 96;
+		boolean square = false;
+		float ratio = 1.25f;
+		int dim = Math.round(96f * ratio);
 
 		// generate html page
 		List<String> html = new ArrayList<String>();
 		html.add("<html>");
 		for (String name: names) {
 			String truncName = StringUtils.substringBefore(name, ".");
-			html.add("<div style=\"position: relative; height: " + dim + "px; width: " + dim + "px; border: 1px solid #ccc; float: left; overflow:hidden;\">");	
-			html.add("<img src=\"" + name + "\" alt=\"" + truncName + "\" title=\"" + truncName + "\" width=\"" + dim + "\" height=\"" + dim + "\" />");	
-			html.add("<span style=\"position: relative; bottom: 10px; z-index:9999; font-family: Bahnschrift; font-size: 10px; font-weight: bold; display: inline-block; background: #fff;\">" + truncName + "</span>");	
+			html.add("<div style=\"position: relative; width: " + dim + "px; height: " + (square ? dim : 200) + "px; border: 1px solid #ccc; float: left; overflow:hidden;\">");	
+			html.add("<img src=\"" + name + "\" alt=\"" + truncName + "\" title=\"" + truncName + "\" width=\"" + dim + "\" />");	
+			html.add("<span style=\"position: relative; margin-top: -10px; font-family: Bahnschrift; font-size: 10px; font-weight: bold; display: inline-block; background: #fff;\">" + truncName + "</span>");	
 			html.add("</div>");	
 		}
 		html.add("</html>");
 		
-		File outFile = new File(attackFolder + "\\index.html");
+		File outFile = new File(attackFolder + "\\index-" + dim + ".html");
 		FileUtils.write(outFile, StringUtils.join(html, "\n"), "UTF-8");
 		
 		String[] cmd = { "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" \"file:///" + outFile + "\"" };
