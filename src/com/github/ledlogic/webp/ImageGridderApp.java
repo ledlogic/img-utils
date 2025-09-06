@@ -17,7 +17,7 @@ public class ImageGridderApp {
 	public static void main(String[] args) throws IOException, InterruptedException {
 		
 		// attack folder
-		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller CHEFs\\Portraits";
+		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller CHEFs\\Agents";
 		File attackFolderFile = new File(attackFolder);
 				
 		// get filenames
@@ -39,7 +39,8 @@ public class ImageGridderApp {
 		Collections.sort(names);
 
 		boolean square = false;
-		float ratio = 1.25f;
+		//float ratio = 1.25f;
+		float ratio = 1.00f;
 		int dim = Math.round(96f * ratio);
 
 		// generate html page

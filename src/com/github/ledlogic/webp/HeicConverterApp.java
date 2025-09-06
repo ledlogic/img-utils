@@ -5,12 +5,19 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
-public class WebpConverterApp {
+/**
+ * Assumption, running on a system with image magick installed
+ * Ex. install cygwin, install image magick
+ * 
+ * @see https://www.cygwin.com/install.html
+ * @see https://imagemagick.org/script/download.php#windows
+ */
+public class HeicConverterApp {
 	
-	private static WebpFilenameFilter filter = new WebpFilenameFilter();
+	private static HeicFilenameFilter filter = new HeicFilenameFilter();
 	
 	public static void main(String[] args) throws IOException, InterruptedException {
-		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller CHEFs\\Agents";
+		String attackFolder = "G:\\My Drive\\Ebay\\20250901";
 		File attackFolderFile = new File(attackFolder);
 		
 		File[] files = attackFolderFile.listFiles(filter);
@@ -27,7 +34,7 @@ public class WebpConverterApp {
 			String inPath = attackFolder + "\\" + inputFile;
 			String outPath = attackFolder + "\\" + outputFile;
 			
-			WebpConverterService.convertWebFile(inPath, outPath);
+			HeicConverterService.convertWebFile(inPath, outPath);
 		}
 	}
 }
