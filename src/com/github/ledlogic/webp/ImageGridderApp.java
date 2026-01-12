@@ -17,7 +17,7 @@ public class ImageGridderApp {
 	public static void main(String[] args) throws IOException, InterruptedException {
 		
 		// attack folder
-		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller CHEFs\\Agents";
+		String attackFolder = "G:\\My Drive\\Games\\The Chase";
 		File attackFolderFile = new File(attackFolder);
 				
 		// get filenames
@@ -32,13 +32,15 @@ public class ImageGridderApp {
 		File[] files2 = attackFolderFile.listFiles(jpgFilter);
 		for (File file: files2) {
 			String name = file.getName();
-			names.add(name);
+			if (name.contains("floppy")) {
+				names.add(name);
+			}
 		}
 		
 		// sort
 		Collections.sort(names);
 
-		boolean square = false;
+		boolean square = true;
 		//float ratio = 1.25f;
 		float ratio = 1.00f;
 		int dim = Math.round(96f * ratio);
@@ -46,13 +48,14 @@ public class ImageGridderApp {
 		// generate html page
 		List<String> html = new ArrayList<String>();
 		html.add("<html>");
+		for (int i=0;i<100;i++) {
 		for (String name: names) {
 			String truncName = StringUtils.substringBefore(name, ".");
 			html.add("<div style=\"position: relative; width: " + dim + "px; height: " + (square ? dim : 200) + "px; border: 1px solid #ccc; float: left; overflow:hidden;\">");	
 			html.add("<img src=\"" + name + "\" alt=\"" + truncName + "\" title=\"" + truncName + "\" width=\"" + dim + "\" />");	
 			html.add("<span style=\"position: relative; margin-top: -10px; font-family: Bahnschrift; font-size: 10px; font-weight: bold; display: inline-block; background: #fff;\">" + truncName + "</span>");	
 			html.add("</div>");	
-		}
+		}}
 		html.add("</html>");
 		
 		File outFile = new File(attackFolder + "\\index-" + dim + ".html");
