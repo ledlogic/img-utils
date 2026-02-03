@@ -1,14 +1,14 @@
 package com.github.ledlogic.webp;
 
+import java.io.File;
+import java.io.IOException;
+
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
-import org.apache.pdfbox.cos.COSName;
-
-import java.io.File;
-import java.io.IOException;
 
 /**
  * Test tool to inspect what images exist on page 118
@@ -31,7 +31,7 @@ public class PDFImageExtractorTest {
         }
         
         try (PDDocument document = PDDocument.load(pdfFile)) {
-            int totalPages = document.getNumberOfPages();
+			int totalPages = document.getNumberOfPages();
             System.out.println("PDF: " + pdfFile.getName());
             System.out.println("Total pages: " + totalPages);
             System.out.println();
@@ -93,7 +93,7 @@ public class PDFImageExtractorTest {
             
             // Count XObjects manually since getXObjectNames() returns Iterable
             int xobjectCount = 0;
-            for (COSName name : resources.getXObjectNames()) {
+            for (@SuppressWarnings("unused") COSName name : resources.getXObjectNames()) {
                 xobjectCount++;
             }
             
