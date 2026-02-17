@@ -31,7 +31,7 @@ public class PDFImgExtractor extends PDFGraphicsStreamEngine {
 	private static final int MIN_DIMENSION = 150;
 	private static final boolean DEBUG_MODE = true; // Set to false to reduce output
 	private static final boolean RENDER_VECTOR_PAGES = true; // Render pages with vector graphics
-	private static final int[] PAGES_TO_RENDER = { 119 }; // Pages to render as full images (for vector graphics)
+	private static final int[] PAGES_TO_RENDER = { 26,27 }; // Pages to render as full images (for vector graphics)
 	private static final int RENDER_DPI = 300; // DPI for rendering vector pages
 	private int imageCounter = 0;
 	private Map<String, ImageFingerprint> imageFingerprints = new HashMap<>();

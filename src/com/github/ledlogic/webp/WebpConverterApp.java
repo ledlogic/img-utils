@@ -12,7 +12,7 @@ public class WebpConverterApp {
 	private static WebpFilenameFilter filter = new WebpFilenameFilter();
 	
 	public static void main(String[] args) throws IOException, InterruptedException {
-		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller Mayday\\2025\\characters";
+		String attackFolder = "G:\\My Drive\\Games\\Bubblegum Crisis\\2026\\npcs";
 		File attackFolderFile = new File(attackFolder);
 		
 		File[] files = attackFolderFile.listFiles(filter);
