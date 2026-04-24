@@ -7,17 +7,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * MapCrop - CLI tool to detect and crop map/floor-plan rectangles from
+ * ImageCropApp - CLI tool to detect and crop map/floor-plan rectangles from
  * blueprint-style PNG files.
  *
  * Handles single maps (one rectangle) and side-by-side maps (two rectangles).
- * When two rectangles are found they are placed side-by-side in the output.
+ * When two rectangles are found they are saved as separate files.
  *
- * Output file is named  <stem>t.png  (adds "t" before the extension).
- * An explicit output path can also be supplied as a second argument.
+ * Output files are named <stem>t.png (single) or <stem>_1t.png / <stem>_2t.png (dual),
+ * saved in the same directory as the source image.
  *
  * Usage:
- *   java -jar ImageCropApp.jar <input.png> [output.png]
+ *   java -jar ImageCropApp.jar <input.png>          process one file
+ *   java -jar ImageCropApp.jar <folder>             process all *.png in folder
+ *                                                   (skips files ending in t.png)
  */
 public class ImageCropApp {
 
@@ -46,23 +48,52 @@ public class ImageCropApp {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
-            System.err.println("Usage: java -jar ImageCropApp.jar <input.png> [output.png]");
+            System.err.println("Usage: java -jar ImageCropApp.jar <input.png|folder>");
             System.exit(1);
         }
 
-        String inputPath  = args[0];
-        // outputPath is used only for single-map mode; dual-map derives names automatically
-        String outputPath = (args.length >= 2) ? args[1] : tSuffix(inputPath);
-
-        File inputFile = new File(inputPath);
-        if (!inputFile.exists()) {
-            System.err.println("Error: file not found – " + inputPath);
+        File input = new File(args[0]);
+        if (!input.exists()) {
+            System.err.println("Error: path not found – " + args[0]);
             System.exit(1);
         }
+
+        if (input.isDirectory()) {
+            File[] pngs = input.listFiles(f ->
+                f.isFile()
+                && f.getName().toLowerCase().endsWith(".png")
+                && !f.getName().toLowerCase().endsWith("t.png"));
+            if (pngs == null || pngs.length == 0) {
+                System.out.println("No eligible PNG files found in: " + input.getAbsolutePath());
+                return;
+            }
+            java.util.Arrays.sort(pngs);
+            System.out.printf("Found %d PNG file(s) to process in: %s%n",
+                    pngs.length, input.getAbsolutePath());
+            int ok = 0, failed = 0;
+            for (File f : pngs) {
+                System.out.println("\n── " + f.getName() + " ──");
+                try {
+                    processFile(f);
+                    ok++;
+                } catch (Exception e) {
+                    System.err.println("  FAILED: " + e.getMessage());
+                    failed++;
+                }
+            }
+            System.out.printf("%nDone: %d succeeded, %d failed.%n", ok, failed);
+        } else {
+            processFile(input);
+        }
+    }
+
+    static void processFile(File inputFile) throws Exception {
+        String inputPath = inputFile.getAbsolutePath();
+        String outputPath = tSuffix(inputPath);
 
         System.out.println("Reading: " + inputPath);
         BufferedImage img = readRaw(inputFile);
-        if (img == null) { System.err.println("Error: unreadable image"); System.exit(1); }
+        if (img == null) { System.err.println("Error: unreadable image"); return; }
 
         int W = img.getWidth(), H = img.getHeight();
         System.out.printf("Image size: %d × %d px%n", W, H);
@@ -155,10 +186,8 @@ public class ImageCropApp {
 
         if (dualMap) {
             System.out.println("Detected: DUAL MAP layout — saving two files");
-            int titleTop = findTitleTop(rowCount, rowBandsL.get(0)[0]);
-
-            int[] rectL = rect(rowBandsL, colBandsL, H, W, titleTop);
-            int[] rectR = rect(rowBandsR, colBandsR, H, W, titleTop);
+            int[] rectL = rect(rowBandsL, colBandsL, H, W);
+            int[] rectR = rect(rowBandsR, colBandsR, H, W);
             printRect("Left map",  rectL);
             printRect("Right map", rectR);
 
@@ -166,16 +195,15 @@ public class ImageCropApp {
             BufferedImage right = crop(img, rectR);
 
             // Derive two output paths: stem_1t.png and stem_2t.png
-            String outL = dualOutPath(outputPath, 1);
-            String outR = dualOutPath(outputPath, 2);
+            String outL = dualOutPath(inputPath, 1);
+            String outR = dualOutPath(inputPath, 2);
             ImageIO.write(left,  "PNG", new File(outL));
             ImageIO.write(right, "PNG", new File(outR));
             System.out.println("Saved [1]: " + outL + "  (" + left.getWidth()  + "×" + left.getHeight()  + ")");
             System.out.println("Saved [2]: " + outR + "  (" + right.getWidth() + "×" + right.getHeight() + ")");
         } else {
             System.out.println("Detected: SINGLE MAP layout");
-            int titleTop = findTitleTop(rowCount, rowBandsAll.get(0)[0]);
-            int[] rectS = rect(rowBandsAll, colBandsAll, H, W, titleTop);
+            int[] rectS = rect(rowBandsAll, colBandsAll, H, W);
             printRect("Map", rectS);
             BufferedImage output = crop(img, rectS);
             ImageIO.write(output, "PNG", new File(outputPath));
@@ -185,31 +213,49 @@ public class ImageCropApp {
 
     // ── Geometry helpers ─────────────────────────────────────────────────────
 
-    /** Returns {x, y, w, h} crop rectangle from band lists. */
-    static int[] rect(List<int[]> rowBands, List<int[]> colBands,
-                      int H, int W, int titleTop) {
-        int topRow    = rowBands.get(0)[0];
-        int bottomRow = rowBands.get(rowBands.size() - 1)[1];
-        int leftCol   = colBands.get(0)[0];
-        int rightCol  = colBands.get(colBands.size() - 1)[1];
+    /** Returns {x, y, w, h} crop rectangle from band lists.
+     *  Uses the pair of THICK bands (>=3px) with the largest gap between them
+     *  as the outer rectangle — this ignores thin stray bands from notes/text
+     *  outside the map grid. */
+    static int[] rect(List<int[]> rowBands, List<int[]> colBands, int H, int W) {
+        int[] topRowBand    = outerBand(rowBands, true);
+        int[] bottomRowBand = outerBand(rowBands, false);
+        int[] leftColBand   = outerBand(colBands, true);
+        int[] rightColBand  = outerBand(colBands, false);
 
-        int cropX = Math.max(0, leftCol  - PADDING);
-        int cropY = Math.max(0, titleTop);
-        int cropW = Math.min(W, rightCol  + PADDING + 1) - cropX;
-        int cropH = Math.min(H, bottomRow + PADDING + 1) - cropY;
+        int cropX = Math.max(0, leftColBand[0]);
+        int cropY = Math.max(0, topRowBand[0]);
+        int cropW = Math.min(W, rightColBand[1] + 1) - cropX;
+        int cropH = Math.min(H, bottomRowBand[1] + 1) - cropY;
         return new int[]{cropX, cropY, cropW, cropH};
+    }
+
+    /**
+     * From a list of bands, selects the top (first=true) or bottom (first=false)
+     * band of the pair that has the largest gap between them, considering only
+     * bands with thickness >= MIN_BORDER_THICKNESS to ignore stray thin marks.
+     */
+    static final int MIN_BORDER_THICKNESS = 3;
+
+    static int[] outerBand(List<int[]> bands, boolean wantFirst) {
+        // Filter to thick bands only
+        List<int[]> thick = new ArrayList<>();
+        for (int[] b : bands)
+            if (b[1] - b[0] + 1 >= MIN_BORDER_THICKNESS) thick.add(b);
+        if (thick.isEmpty()) thick = bands; // fallback: use all bands
+
+        // Find the pair with the largest gap
+        int bestGap = -1, bestI = 0, bestJ = thick.size() - 1;
+        for (int i = 0; i < thick.size(); i++)
+            for (int j = i + 1; j < thick.size(); j++) {
+                int gap = thick.get(j)[0] - thick.get(i)[1];
+                if (gap > bestGap) { bestGap = gap; bestI = i; bestJ = j; }
+            }
+        return wantFirst ? thick.get(bestI) : thick.get(bestJ);
     }
 
     static BufferedImage crop(BufferedImage img, int[] r) {
         return img.getSubimage(r[0], r[1], r[2], r[3]);
-    }
-
-    /** stem_1t.png / stem_2t.png  (or  stem_1t.png if input already ends in t) */
-    static String dualOutPath(String input, int n) {
-        int dot = input.lastIndexOf('.');
-        String stem = (dot >= 0) ? input.substring(0, dot) : input;
-        String ext  = (dot >= 0) ? input.substring(dot)    : ".png";
-        return stem + "_" + n + "t" + ext;
     }
 
     // ── Orange mask ──────────────────────────────────────────────────────────
@@ -306,10 +352,24 @@ public class ImageCropApp {
 
     // ── Utilities ────────────────────────────────────────────────────────────
 
-    static String tSuffix(String path) {
-        int dot = path.lastIndexOf('.');
-        return (dot >= 0) ? path.substring(0, dot) + "t" + path.substring(dot)
-                          : path + "t.png";
+    /** Derives the output path in the same directory as the source file. */
+    static String tSuffix(String inputPath) {
+        File f      = new File(inputPath).getAbsoluteFile();
+        String name = f.getName();
+        int dot     = name.lastIndexOf('.');
+        String out  = (dot >= 0) ? name.substring(0, dot) + "t" + name.substring(dot)
+                                 : name + "t.png";
+        return new File(f.getParent(), out).getPath();
+    }
+
+    /** stem_1t.png / stem_2t.png saved beside the source file. */
+    static String dualOutPath(String inputPath, int n) {
+        File f      = new File(inputPath).getAbsoluteFile();
+        String name = f.getName();
+        int dot     = name.lastIndexOf('.');
+        String stem = (dot >= 0) ? name.substring(0, dot) : name;
+        String ext  = (dot >= 0) ? name.substring(dot)    : ".png";
+        return new File(f.getParent(), stem + "_" + n + "t" + ext).getPath();
     }
 
     static String bandsStr(List<int[]> bands) {
