@@ -61,7 +61,7 @@ public class ImageCropApp {
         }
 
         System.out.println("Reading: " + inputPath);
-        BufferedImage img = ImageIO.read(inputFile);
+        BufferedImage img = readRaw(inputFile);
         if (img == null) { System.err.println("Error: unreadable image"); System.exit(1); }
 
         int W = img.getWidth(), H = img.getHeight();
@@ -92,38 +92,64 @@ public class ImageCropApp {
         int[] rowCountLeft  = halfRowCount(orange, H, 0,    half);
         int[] rowCountRight = halfRowCount(orange, H, half, W);
 
-        int rowThresh = (int)(half * BORDER_DENSITY_ROW);
-        int colThresh = (int)(H    * BORDER_DENSITY_COL);
+        // ── Try progressively lower thresholds until detection succeeds ────────
+        // This handles ICC-profile colour shifts across JVM versions and OS platforms.
+        double[] rowDensities = { BORDER_DENSITY_ROW, 0.35, 0.25, 0.15 };
+        double[] colDensities = { BORDER_DENSITY_COL, 0.25, 0.15, 0.08 };
 
-        List<int[]> rowBandsL = denseBands(rowCountLeft,  rowThresh, BAND_GAP);
-        List<int[]> rowBandsR = denseBands(rowCountRight, rowThresh, BAND_GAP);
-        List<int[]> colBandsL = denseBands(colCountLeft,  colThresh, BAND_GAP);
-        List<int[]> colBandsR = denseBands(colCountRight, colThresh, BAND_GAP);
+        List<int[]> rowBandsL = null, rowBandsR = null,
+                    colBandsL = null, colBandsR = null,
+                    colBandsAll = null, rowBandsAll = null;
+        boolean dualMap = false, singleMap = false;
 
-        // Offset right-half column indices back to full-image coords
-        colBandsR.forEach(b -> { b[0] += half; b[1] += half; });
+        outer:
+        for (double rd : rowDensities) {
+            for (double cd : colDensities) {
+                int rowThresh = (int)(half * rd);
+                int colThresh = (int)(H    * cd);
 
-        System.out.println("Left  row bands: " + bandsStr(rowBandsL));
-        System.out.println("Right row bands: " + bandsStr(rowBandsR));
-        System.out.println("Left  col bands: " + bandsStr(colBandsL));
-        System.out.println("Right col bands: " + bandsStr(colBandsR));
+                List<int[]> rL = denseBands(rowCountLeft,  rowThresh, BAND_GAP);
+                List<int[]> rR = denseBands(rowCountRight, rowThresh, BAND_GAP);
+                List<int[]> cL = denseBands(colCountLeft,  colThresh, BAND_GAP);
+                List<int[]> cR = denseBands(colCountRight, colThresh, BAND_GAP);
+                cR.forEach(b -> { b[0] += half; b[1] += half; });
 
-        // Decide: dual map or single map
-        boolean dualMap = colBandsL.size() >= 2 && colBandsR.size() >= 2
-                       && rowBandsL.size() >= 2 && rowBandsR.size() >= 2;
-        boolean singleMap;
-        List<int[]> colBandsAll, rowBandsAll;
-        if (!dualMap) {
-            // Fall back to full-width analysis
-            colBandsAll = denseBands(colCount, (int)(H * 0.12), BAND_GAP);
-            rowBandsAll = denseBands(rowCount, (int)(W * 0.55), BAND_GAP);
-            singleMap = colBandsAll.size() >= 2 && rowBandsAll.size() >= 2;
-        } else {
-            colBandsAll = null; rowBandsAll = null; singleMap = false;
+                if (cL.size() >= 2 && cR.size() >= 2 && rL.size() >= 2 && rR.size() >= 2) {
+                    rowBandsL = rL; rowBandsR = rR; colBandsL = cL; colBandsR = cR;
+                    dualMap = true;
+                    System.out.printf("Thresholds: row=%.0f%% col=%.0f%%%n", rd*100, cd*100);
+                    break outer;
+                }
+
+                // Single-map fallback
+                List<int[]> cAll = denseBands(colCount, (int)(H * cd),        BAND_GAP);
+                List<int[]> rAll = denseBands(rowCount, (int)(W * rd * 1.22), BAND_GAP);
+                if (cAll.size() >= 2 && rAll.size() >= 2) {
+                    colBandsAll = cAll; rowBandsAll = rAll;
+                    singleMap = true;
+                    System.out.printf("Thresholds (single): row=%.0f%% col=%.0f%%%n", rd*122, cd*100);
+                    break outer;
+                }
+            }
         }
+
+        System.out.println("Left  row bands: " + (rowBandsL  != null ? bandsStr(rowBandsL)  : "—"));
+        System.out.println("Right row bands: " + (rowBandsR  != null ? bandsStr(rowBandsR)  : "—"));
+        System.out.println("Left  col bands: " + (colBandsL  != null ? bandsStr(colBandsL)  : "—"));
+        System.out.println("Right col bands: " + (colBandsR  != null ? bandsStr(colBandsR)  : "—"));
 
         if (!dualMap && !singleMap) {
             System.err.println("Error: could not detect map rectangle(s).");
+            System.err.println("Tip: run with --debug to see orange pixel diagnostics.");
+            // Print diagnostics unconditionally so the user can report them
+            int maxR=0; for(int v:rowCount) if(v>maxR) maxR=v;
+            int maxC=0; for(int v:colCount) if(v>maxC) maxC=v;
+            System.err.printf("  Max orange pixels per row: %d (need ~%d for single, ~%d for dual)%n",
+                    maxR, (int)(W*0.12), (int)(half*0.15));
+            System.err.printf("  Max orange pixels per col: %d (need ~%d)%n",
+                    maxC, (int)(H*0.08));
+            System.err.printf("  Image: %dx%d  Orange mask R>%d G=%d-%d B<%d%n",
+                    W, H, ORANGE_R_MIN, ORANGE_G_MIN, ORANGE_G_MAX, ORANGE_B_MAX);
             System.exit(1);
         }
 
@@ -187,6 +213,48 @@ public class ImageCropApp {
     }
 
     // ── Orange mask ──────────────────────────────────────────────────────────
+
+    /**
+     * Reads a PNG bypassing embedded ICC profile colour conversion, which some
+     * JVM versions (e.g. JDK 21.0.1) apply during ImageIO.read(), shifting
+     * pixel values and breaking the orange threshold checks.
+     * Forces result into plain TYPE_INT_RGB so values match the raw file bytes.
+     */
+    static BufferedImage readRaw(File file) throws Exception {
+        try (javax.imageio.stream.ImageInputStream iis =
+                     ImageIO.createImageInputStream(file)) {
+            java.util.Iterator<javax.imageio.ImageReader> readers =
+                    ImageIO.getImageReaders(iis);
+            if (!readers.hasNext()) return null;
+
+            javax.imageio.ImageReader reader = readers.next();
+            reader.setInput(iis, true, true); // ignoreMetadata=true skips ICC
+
+            javax.imageio.ImageReadParam param = reader.getDefaultReadParam();
+            param.setDestinationType(
+                    javax.imageio.ImageTypeSpecifier.createFromBufferedImageType(
+                            BufferedImage.TYPE_INT_RGB));
+
+            BufferedImage raw;
+            try {
+                raw = reader.read(0, param);
+            } catch (Exception e) {
+                raw = reader.read(0); // fallback if decoder ignores dest type
+            }
+            reader.dispose();
+
+            // Ensure TYPE_INT_RGB (some decoders ignore the hint above)
+            if (raw.getType() != BufferedImage.TYPE_INT_RGB) {
+                BufferedImage dst = new BufferedImage(
+                        raw.getWidth(), raw.getHeight(), BufferedImage.TYPE_INT_RGB);
+                java.awt.Graphics2D g = dst.createGraphics();
+                g.drawImage(raw, 0, 0, null);
+                g.dispose();
+                raw = dst;
+            }
+            return raw;
+        }
+    }
 
     static boolean[][] buildOrangeMask(BufferedImage img, int W, int H) {
         boolean[][] mask = new boolean[H][W];
