@@ -1,24 +1,13 @@
 package com.github.ledlogic.webp;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.regex.*;
+import java.util.stream.*;
+import java.util.zip.*;
 
 /**
  * ZipExtractor - CLI tool to extract and merge Google Drive split zip downloads.
@@ -27,16 +16,17 @@ import java.util.zip.ZipInputStream;
  *   java com.github.ledlogic.webp.ZipExtractor <directory-or-zip> [options]
  *
  *   <directory-or-zip> may be:
- *     - A directory  → scans for all matching numbered zip files inside it
- *     - A single .zip file → extracts just that one file into its parent directory
+ *     - A directory  -> scans for all matching numbered zip files inside it
+ *     - A single .zip file -> extracts just that one file into its parent directory
  *
  * Options:
  *   --dry-run, -n          Show what would be done without changing anything
+ *   --threads, -t <N>      Parallel threads (default: all CPU cores, autodetected)
  *   --pattern, -p <regex>  Override the filename-matching regex (directory mode only)
  *   --help, -h             Show this help
  *
  * Default pattern matches files like:
- *   drive-download-20260503T145811Z-3-001.zip … -023.zip
+ *   drive-download-20260503T145811Z-3-001.zip ... -023.zip
  */
 public class ZipExtractor {
 
@@ -44,7 +34,7 @@ public class ZipExtractor {
     private static final Pattern DEFAULT_PATTERN =
             Pattern.compile("^(.+)-(\\d{3,})\\.zip$", Pattern.CASE_INSENSITIVE);
 
-    // ANSI colours (disabled on Windows unless in Windows Terminal)
+    // ANSI colours (disabled on plain Windows cmd; enabled in Windows Terminal)
     private static final String RESET  = "\u001B[0m";
     private static final String BOLD   = "\u001B[1m";
     private static final String GREEN  = "\u001B[32m";
@@ -55,15 +45,16 @@ public class ZipExtractor {
             !System.getProperty("os.name", "").toLowerCase().contains("win")
             || System.getenv("WT_SESSION") != null;
 
+    // Serialize console writes so parallel threads don't interleave lines
+    private static final Object PRINT_LOCK = new Object();
+
     public static void main(String[] args) {
-        if (args.length == 0) {
-            printUsage();
-            System.exit(1);
-        }
+        if (args.length == 0) { printUsage(); System.exit(1); }
 
         // --- Parse arguments ---
-        Path inputPath      = null;
-        boolean dryRun      = false;
+        Path    inputPath     = null;
+        boolean dryRun        = false;
+        int     threads       = Runtime.getRuntime().availableProcessors(); // autodetect
         Pattern customPattern = null;
 
         for (int i = 0; i < args.length; i++) {
@@ -71,14 +62,23 @@ public class ZipExtractor {
                 case "--dry-run": case "-n":
                     dryRun = true;
                     break;
+                case "--threads": case "-t":
+                    if (++i >= args.length) { err("--threads requires a number"); System.exit(1); }
+                    try {
+                        threads = Integer.parseInt(args[i]);
+                        if (threads < 1) throw new NumberFormatException();
+                    } catch (NumberFormatException e) {
+                        err("--threads must be a positive integer, got: " + args[i]);
+                        System.exit(1);
+                    }
+                    break;
                 case "--pattern": case "-p":
                     if (++i >= args.length) { err("--pattern requires an argument"); System.exit(1); }
                     try { customPattern = Pattern.compile(args[i], Pattern.CASE_INSENSITIVE); }
                     catch (PatternSyntaxException e) { err("Invalid regex: " + e.getMessage()); System.exit(1); }
                     break;
                 case "--help": case "-h":
-                    printUsage();
-                    System.exit(0);
+                    printUsage(); System.exit(0);
                     break;
                 default:
                     if (inputPath == null) inputPath = Paths.get(args[i]);
@@ -90,17 +90,14 @@ public class ZipExtractor {
         if (!Files.exists(inputPath)) { err("Path does not exist: " + inputPath); System.exit(1); }
 
         info(BOLD + "ZipExtractor" + RESET);
-        if (dryRun) info(YELLOW + "[DRY RUN – no files will be changed]" + RESET);
-        System.out.println();
+        if (dryRun) info(YELLOW + "[DRY RUN - no files will be changed]" + RESET);
 
         int exitCode;
         if (Files.isRegularFile(inputPath)) {
-            // ── Single-file mode ──────────────────────────────────────────────
             if (customPattern != null) warn("--pattern is ignored in single-file mode.");
             exitCode = processSingleFile(inputPath, dryRun);
         } else if (Files.isDirectory(inputPath)) {
-            // ── Directory mode ────────────────────────────────────────────────
-            exitCode = processDirectory(inputPath, customPattern, dryRun);
+            exitCode = processDirectory(inputPath, customPattern, threads, dryRun);
         } else {
             err("Not a file or directory: " + inputPath);
             exitCode = 1;
@@ -111,18 +108,14 @@ public class ZipExtractor {
 
     // ── Single-file mode ──────────────────────────────────────────────────────
 
-    /**
-     * Extracts a single named zip into its parent directory, then deletes it.
-     * Returns 0 on success, 2 on error.
-     */
     private static int processSingleFile(Path zipFile, boolean dryRun) {
         if (!zipFile.getFileName().toString().toLowerCase().endsWith(".zip")) {
             err("File does not have a .zip extension: " + zipFile);
             return 1;
         }
-
         Path destDir = zipFile.toAbsolutePath().getParent();
 
+        System.out.println();
         info("File      : " + zipFile.toAbsolutePath());
         info("Extract to: " + destDir);
         System.out.println();
@@ -133,27 +126,20 @@ public class ZipExtractor {
 
         boolean deleted = deleteZip(zipFile, dryRun);
         System.out.println();
-
-        info(BOLD + "Done." + RESET);
-        info(GREEN + "  Entries extracted : " + extracted + RESET);
-        info(GREEN + "  Zip files deleted : " + (deleted ? 1 : 0) + RESET);
-        if (!deleted) info(RED + "  Errors            : 1" + RESET);
-        if (dryRun)   info(YELLOW + "  (Dry run – nothing was actually changed)" + RESET);
-
+        printSummary(extracted, deleted ? 1 : 0, deleted ? 0 : 1, 1, dryRun);
         return deleted ? 0 : 2;
     }
 
     // ── Directory mode ────────────────────────────────────────────────────────
 
-    /**
-     * Scans {@code dir} for numbered zip groups, extracts and deletes them.
-     * Returns 0 on full success, 2 if any errors occurred.
-     */
-    private static int processDirectory(Path dir, Pattern customPattern, boolean dryRun) {
+    private static int processDirectory(Path dir, Pattern customPattern, int threads, boolean dryRun) {
         Pattern matchPattern = customPattern != null ? customPattern : DEFAULT_PATTERN;
 
+        System.out.println();
         info("Directory : " + dir.toAbsolutePath());
         info("Pattern   : " + matchPattern.pattern());
+        info("Threads   : " + threads
+                + "  (logical CPU cores available: " + Runtime.getRuntime().availableProcessors() + ")");
         System.out.println();
 
         // Discover matching zips
@@ -169,10 +155,7 @@ public class ZipExtractor {
             return 1;
         }
 
-        if (allZips.isEmpty()) {
-            warn("No matching zip files found in " + dir);
-            return 0;
-        }
+        if (allZips.isEmpty()) { warn("No matching zip files found in " + dir); return 0; }
 
         // Group by prefix (everything before -NNN)
         Map<String, List<Path>> groups = new LinkedHashMap<>();
@@ -185,77 +168,99 @@ public class ZipExtractor {
         info(String.format("Found %d zip file(s) in %d group(s).", allZips.size(), groups.size()));
         System.out.println();
 
-        int totalExtracted = 0;
-        int totalDeleted   = 0;
-        int errors         = 0;
+        // Shared counters - safe for concurrent increment
+        AtomicInteger totalExtracted = new AtomicInteger(0);
+        AtomicInteger totalDeleted   = new AtomicInteger(0);
+        AtomicInteger errors         = new AtomicInteger(0);
+
+        long startMs = System.currentTimeMillis();
 
         for (Map.Entry<String, List<Path>> entry : groups.entrySet()) {
-            String prefix      = entry.getKey();
+            String     prefix  = entry.getKey();
             List<Path> zipList = entry.getValue();
 
             info(BOLD + CYAN + "Group: " + prefix + RESET
                     + "  (" + zipList.size() + " file" + (zipList.size() > 1 ? "s" : "") + ")");
 
+            // Cap pool to number of files in group — no point in idle threads
+            int poolSize = Math.min(threads, zipList.size());
+            ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+            List<Future<?>> futures = new ArrayList<>();
+
             for (Path zip : zipList) {
-                info("  " + CYAN + zip.getFileName() + RESET);
-                int extracted = extractZip(zip, dir, dryRun);
-                if (extracted < 0) {
-                    errors++;
-                } else {
-                    totalExtracted += extracted;
-                    if (deleteZip(zip, dryRun)) totalDeleted++;
-                    else errors++;
+                futures.add(pool.submit(() -> {
+                    info("  " + CYAN + "[start] " + zip.getFileName() + RESET);
+                    int extracted = extractZip(zip, dir, dryRun);
+                    if (extracted < 0) {
+                        errors.incrementAndGet();
+                    } else {
+                        totalExtracted.addAndGet(extracted);
+                        if (deleteZip(zip, dryRun)) totalDeleted.incrementAndGet();
+                        else errors.incrementAndGet();
+                    }
+                }));
+            }
+
+            // Wait for every zip in this group
+            pool.shutdown();
+            for (Future<?> f : futures) {
+                try { f.get(); }
+                catch (ExecutionException e) {
+                    err("Unexpected worker error: " + e.getCause());
+                    errors.incrementAndGet();
                 }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
             System.out.println();
         }
 
-        info(BOLD + "Done." + RESET);
-        info(GREEN + "  Entries extracted : " + totalExtracted + RESET);
-        info(GREEN + "  Zip files deleted : " + totalDeleted   + RESET);
-        if (errors > 0) info(RED + "  Errors            : " + errors + RESET);
-        if (dryRun)     info(YELLOW + "  (Dry run – nothing was actually changed)" + RESET);
-
-        return errors > 0 ? 2 : 0;
+        long elapsedSec = (System.currentTimeMillis() - startMs) / 1000;
+        info(String.format("Completed in %d s", elapsedSec));
+        printSummary(totalExtracted.get(), totalDeleted.get(), errors.get(), allZips.size(), dryRun);
+        return errors.get() > 0 ? 2 : 0;
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
     /**
      * Extracts all entries from {@code zip} into {@code destDir}.
+     * Uses a 64 KB read/write buffer for efficient I/O.
      * Returns the number of file entries extracted, or -1 on error.
      */
     private static int extractZip(Path zip, Path destDir, boolean dryRun) {
         int count = 0;
+        byte[] buf = new byte[64 * 1024];
         try (ZipInputStream zis = new ZipInputStream(
-                new BufferedInputStream(Files.newInputStream(zip)))) {
+                new BufferedInputStream(Files.newInputStream(zip), 128 * 1024))) {
 
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 Path outPath = resolveEntry(destDir, entry.getName());
                 if (outPath == null) {
-                    warn("    Skipping potentially unsafe entry: " + entry.getName());
+                    warn("  [SKIP] unsafe path in " + zip.getFileName() + ": " + entry.getName());
                     zis.closeEntry();
                     continue;
                 }
 
                 if (entry.isDirectory()) {
                     if (!dryRun) Files.createDirectories(outPath);
-                    info("    [DIR]  " + entry.getName());
+                    info("  [DIR]  " + zip.getFileName() + " -> " + entry.getName());
                 } else {
                     if (!dryRun) {
                         Files.createDirectories(outPath.getParent());
-                        try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(outPath))) {
-                            zis.transferTo(out);
+                        try (OutputStream out = new BufferedOutputStream(
+                                Files.newOutputStream(outPath), 64 * 1024)) {
+                            int n;
+                            while ((n = zis.read(buf)) != -1) out.write(buf, 0, n);
                         }
                     }
-                    info("    [FILE] " + entry.getName());
+                    info("  [FILE] " + zip.getFileName() + " -> " + entry.getName());
                     count++;
                 }
                 zis.closeEntry();
             }
         } catch (IOException e) {
-            err("    ERROR extracting " + zip.getFileName() + ": " + e.getMessage());
+            err("ERROR extracting " + zip.getFileName() + ": " + e.getMessage());
             return -1;
         }
         return count;
@@ -264,31 +269,38 @@ public class ZipExtractor {
     /** Deletes {@code zip}. Returns true on success. */
     private static boolean deleteZip(Path zip, boolean dryRun) {
         if (dryRun) {
-            info("    " + YELLOW + "[would delete] " + zip.getFileName() + RESET);
+            info("  " + YELLOW + "[would delete] " + zip.getFileName() + RESET);
             return true;
         }
         try {
             Files.delete(zip);
-            info("    " + GREEN + "[deleted] " + zip.getFileName() + RESET);
+            info("  " + GREEN + "[deleted] " + zip.getFileName() + RESET);
             return true;
         } catch (IOException e) {
-            err("    ERROR deleting " + zip.getFileName() + ": " + e.getMessage());
+            err("ERROR deleting " + zip.getFileName() + ": " + e.getMessage());
             return false;
         }
     }
 
     /**
-     * Resolves a zip entry name against {@code destDir}, preventing zip-slip attacks.
-     * Returns null if the resolved path would escape destDir.
+     * Resolves a zip entry name safely inside destDir (zip-slip guard).
+     * Returns null if the path would escape destDir.
      */
     private static Path resolveEntry(Path destDir, String entryName) {
         String normalized = entryName.replace('\\', '/').replaceAll("^/+", "");
         Path resolved = destDir.resolve(normalized).normalize();
-        if (!resolved.startsWith(destDir.normalize())) return null;
-        return resolved;
+        return resolved.startsWith(destDir.normalize()) ? resolved : null;
     }
 
-    // --- Console output ---
+    // --- Console output (all synchronized to prevent parallel line interleaving) ---
+
+    private static void printSummary(int extracted, int deleted, int errs, int total, boolean dryRun) {
+        info(BOLD + "Done." + RESET);
+        info(GREEN + "  Entries extracted : " + extracted + RESET);
+        info(GREEN + "  Zip files deleted : " + deleted + " / " + total + RESET);
+        if (errs > 0) info(RED + "  Errors            : " + errs + RESET);
+        if (dryRun)   info(YELLOW + "  (Dry run - nothing was actually changed)" + RESET);
+    }
 
     private static void printUsage() {
         System.out.println();
@@ -296,17 +308,19 @@ public class ZipExtractor {
         System.out.println("  java com.github.ledlogic.webp.ZipExtractor <directory-or-zip> [options]");
         System.out.println();
         System.out.println("  <directory-or-zip>");
-        System.out.println("    A directory  → scans for all numbered zip files matching the pattern");
-        System.out.println("    A .zip file  → extracts just that file into its parent directory");
+        System.out.println("    A directory  -> scans for all numbered zip files matching the pattern");
+        System.out.println("    A .zip file  -> extracts just that file into its parent directory");
         System.out.println();
         System.out.println("Options:");
-        System.out.println("  --dry-run, -n          Show what would be done without changing anything");
-        System.out.println("  --pattern, -p <regex>  Override filename-matching regex (directory mode only)");
-        System.out.println("  --help, -h             Show this help");
+        System.out.println("  --dry-run,  -n          Show what would be done without changing anything");
+        System.out.println("  --threads,  -t <N>      Parallel threads (default: all CPU cores, autodetected)");
+        System.out.println("  --pattern,  -p <regex>  Override filename-matching regex (directory mode only)");
+        System.out.println("  --help,     -h          Show this help");
         System.out.println();
         System.out.println("Examples:");
         System.out.println("  ZipExtractor ~/Downloads/drive-stuff");
         System.out.println("  ZipExtractor ~/Downloads/drive-stuff --dry-run");
+        System.out.println("  ZipExtractor ~/Downloads/drive-stuff --threads 4");
         System.out.println("  ZipExtractor ~/Downloads/drive-download-20260503T145811Z-3-007.zip");
         System.out.println("  ZipExtractor ~/Downloads/drive-stuff --pattern \"backup-\\d{4}-part\\d+\\.zip\"");
         System.out.println();
@@ -317,15 +331,21 @@ public class ZipExtractor {
     }
 
     private static void info(String msg) {
-        System.out.println(USE_COLOR ? msg : stripAnsi(msg));
+        synchronized (PRINT_LOCK) {
+            System.out.println(USE_COLOR ? msg : stripAnsi(msg));
+        }
     }
 
     private static void warn(String msg) {
-        System.out.println(USE_COLOR ? YELLOW + msg + RESET : stripAnsi(msg));
+        synchronized (PRINT_LOCK) {
+            System.out.println(USE_COLOR ? YELLOW + msg + RESET : stripAnsi(msg));
+        }
     }
 
     private static void err(String msg) {
-        System.err.println(USE_COLOR ? RED + "ERROR: " + msg + RESET : "ERROR: " + stripAnsi(msg));
+        synchronized (PRINT_LOCK) {
+            System.err.println(USE_COLOR ? RED + "ERROR: " + msg + RESET : "ERROR: " + stripAnsi(msg));
+        }
     }
 
     private static String stripAnsi(String s) {
