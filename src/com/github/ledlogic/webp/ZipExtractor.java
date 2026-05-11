@@ -27,6 +27,11 @@ import java.util.zip.*;
  *
  * Default pattern matches files like:
  *   drive-download-20260503T145811Z-3-001.zip ... -023.zip
+ *
+ * Skip behaviour:
+ *   If a destination file already exists AND its size matches the zip entry's
+ *   uncompressed size, extraction of that entry is skipped. The zip is still
+ *   deleted afterwards if ALL its entries were either extracted or skipped.
  */
 public class ZipExtractor {
 
@@ -48,13 +53,23 @@ public class ZipExtractor {
     // Serialize console writes so parallel threads don't interleave lines
     private static final Object PRINT_LOCK = new Object();
 
+    /**
+     * Result of extracting one zip file.
+     * extracted = files written, skipped = files already present with matching size, errors = failures
+     */
+    private static class ExtractResult {
+        int extracted = 0;
+        int skipped   = 0;
+        boolean failed = false; // true if an IOException aborted the whole zip
+    }
+
     public static void main(String[] args) {
         if (args.length == 0) { printUsage(); System.exit(1); }
 
         // --- Parse arguments ---
         Path    inputPath     = null;
         boolean dryRun        = false;
-        int     threads       = Runtime.getRuntime().availableProcessors(); // autodetect
+        int     threads       = Runtime.getRuntime().availableProcessors();
         Pattern customPattern = null;
 
         for (int i = 0; i < args.length; i++) {
@@ -121,12 +136,12 @@ public class ZipExtractor {
         System.out.println();
 
         info(BOLD + CYAN + "File: " + zipFile.getFileName() + RESET);
-        int extracted = extractZip(zipFile, destDir, dryRun);
-        if (extracted < 0) return 2;
+        ExtractResult result = extractZip(zipFile, destDir, dryRun);
+        if (result.failed) return 2;
 
         boolean deleted = deleteZip(zipFile, dryRun);
         System.out.println();
-        printSummary(extracted, deleted ? 1 : 0, deleted ? 0 : 1, 1, dryRun);
+        printSummary(result.extracted, result.skipped, deleted ? 1 : 0, deleted ? 0 : 1, 1, dryRun);
         return deleted ? 0 : 2;
     }
 
@@ -170,6 +185,7 @@ public class ZipExtractor {
 
         // Shared counters - safe for concurrent increment
         AtomicInteger totalExtracted = new AtomicInteger(0);
+        AtomicInteger totalSkipped   = new AtomicInteger(0);
         AtomicInteger totalDeleted   = new AtomicInteger(0);
         AtomicInteger errors         = new AtomicInteger(0);
 
@@ -182,7 +198,6 @@ public class ZipExtractor {
             info(BOLD + CYAN + "Group: " + prefix + RESET
                     + "  (" + zipList.size() + " file" + (zipList.size() > 1 ? "s" : "") + ")");
 
-            // Cap pool to number of files in group — no point in idle threads
             int poolSize = Math.min(threads, zipList.size());
             ExecutorService pool = Executors.newFixedThreadPool(poolSize);
             List<Future<?>> futures = new ArrayList<>();
@@ -190,18 +205,18 @@ public class ZipExtractor {
             for (Path zip : zipList) {
                 futures.add(pool.submit(() -> {
                     info("  " + CYAN + "[start] " + zip.getFileName() + RESET);
-                    int extracted = extractZip(zip, dir, dryRun);
-                    if (extracted < 0) {
+                    ExtractResult result = extractZip(zip, dir, dryRun);
+                    if (result.failed) {
                         errors.incrementAndGet();
                     } else {
-                        totalExtracted.addAndGet(extracted);
+                        totalExtracted.addAndGet(result.extracted);
+                        totalSkipped.addAndGet(result.skipped);
                         if (deleteZip(zip, dryRun)) totalDeleted.incrementAndGet();
                         else errors.incrementAndGet();
                     }
                 }));
             }
 
-            // Wait for every zip in this group
             pool.shutdown();
             for (Future<?> f : futures) {
                 try { f.get(); }
@@ -216,7 +231,7 @@ public class ZipExtractor {
 
         long elapsedSec = (System.currentTimeMillis() - startMs) / 1000;
         info(String.format("Completed in %d s", elapsedSec));
-        printSummary(totalExtracted.get(), totalDeleted.get(), errors.get(), allZips.size(), dryRun);
+        printSummary(totalExtracted.get(), totalSkipped.get(), totalDeleted.get(), errors.get(), allZips.size(), dryRun);
         return errors.get() > 0 ? 2 : 0;
     }
 
@@ -224,46 +239,68 @@ public class ZipExtractor {
 
     /**
      * Extracts all entries from {@code zip} into {@code destDir}.
+     *
+     * Uses ZipFile (not ZipInputStream) so that entry.getSize() is always
+     * populated from the central directory — ZipInputStream reads sequentially
+     * and returns -1 for size when the local header omits it (common with
+     * Google Drive zips).
+     *
+     * Skip logic: if the destination file already exists and its on-disk size
+     * matches the zip entry's uncompressed size, the entry is skipped entirely
+     * (no read, no write). The zip is still deleted afterwards.
+     *
      * Uses a 64 KB read/write buffer for efficient I/O.
-     * Returns the number of file entries extracted, or -1 on error.
      */
-    private static int extractZip(Path zip, Path destDir, boolean dryRun) {
-        int count = 0;
+    private static ExtractResult extractZip(Path zip, Path destDir, boolean dryRun) {
+        ExtractResult result = new ExtractResult();
         byte[] buf = new byte[64 * 1024];
-        try (ZipInputStream zis = new ZipInputStream(
-                new BufferedInputStream(Files.newInputStream(zip), 128 * 1024))) {
+        try (ZipFile zf = new ZipFile(zip.toFile())) {
 
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
+            Enumeration<? extends ZipEntry> entries = zf.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
                 Path outPath = resolveEntry(destDir, entry.getName());
                 if (outPath == null) {
-                    warn("  [SKIP] unsafe path in " + zip.getFileName() + ": " + entry.getName());
-                    zis.closeEntry();
+                    warn("  [SKIP-UNSAFE] " + zip.getFileName() + ": " + entry.getName());
                     continue;
                 }
 
                 if (entry.isDirectory()) {
                     if (!dryRun) Files.createDirectories(outPath);
-                    info("  [DIR]  " + zip.getFileName() + " -> " + entry.getName());
-                } else {
-                    if (!dryRun) {
-                        Files.createDirectories(outPath.getParent());
-                        try (OutputStream out = new BufferedOutputStream(
-                                Files.newOutputStream(outPath), 64 * 1024)) {
-                            int n;
-                            while ((n = zis.read(buf)) != -1) out.write(buf, 0, n);
-                        }
-                    }
-                    info("  [FILE] " + zip.getFileName() + " -> " + entry.getName());
-                    count++;
+                    // directories don't count toward extracted/skipped totals
+                    continue;
                 }
-                zis.closeEntry();
+
+                // ── Skip check (size always available via ZipFile central dir) ──
+                long storedSize = entry.getSize(); // reliable — read from central directory
+                if (storedSize >= 0 && Files.exists(outPath)) {
+                    long diskSize = Files.size(outPath);
+                    if (diskSize == storedSize) {
+                        info("  [SKIP] " + zip.getFileName() + " -> " + entry.getName()
+                                + "  (" + storedSize + " bytes, already exists)");
+                        result.skipped++;
+                        continue;
+                    }
+                }
+
+                // ── Extract ───────────────────────────────────────────────────
+                if (!dryRun) {
+                    Files.createDirectories(outPath.getParent());
+                    try (InputStream in  = zf.getInputStream(entry);
+                         OutputStream out = new BufferedOutputStream(
+                                 Files.newOutputStream(outPath), 64 * 1024)) {
+                        int n;
+                        while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                    }
+                }
+                info("  [FILE] " + zip.getFileName() + " -> " + entry.getName());
+                result.extracted++;
             }
         } catch (IOException e) {
             err("ERROR extracting " + zip.getFileName() + ": " + e.getMessage());
-            return -1;
+            result.failed = true;
         }
-        return count;
+        return result;
     }
 
     /** Deletes {@code zip}. Returns true on success. */
@@ -294,10 +331,11 @@ public class ZipExtractor {
 
     // --- Console output (all synchronized to prevent parallel line interleaving) ---
 
-    private static void printSummary(int extracted, int deleted, int errs, int total, boolean dryRun) {
+    private static void printSummary(int extracted, int skipped, int deleted, int errs, int total, boolean dryRun) {
         info(BOLD + "Done." + RESET);
-        info(GREEN + "  Entries extracted : " + extracted + RESET);
-        info(GREEN + "  Zip files deleted : " + deleted + " / " + total + RESET);
+        info(GREEN  + "  Entries extracted : " + extracted + RESET);
+        info(YELLOW + "  Entries skipped   : " + skipped + " (already existed with matching size)" + RESET);
+        info(GREEN  + "  Zip files deleted : " + deleted + " / " + total + RESET);
         if (errs > 0) info(RED + "  Errors            : " + errs + RESET);
         if (dryRun)   info(YELLOW + "  (Dry run - nothing was actually changed)" + RESET);
     }
@@ -317,12 +355,16 @@ public class ZipExtractor {
         System.out.println("  --pattern,  -p <regex>  Override filename-matching regex (directory mode only)");
         System.out.println("  --help,     -h          Show this help");
         System.out.println();
+        System.out.println("Skip behaviour:");
+        System.out.println("  If a file already exists at the destination with the same size as the");
+        System.out.println("  zip entry's uncompressed size, that entry is skipped (not re-extracted).");
+        System.out.println("  The zip is still deleted if all its entries were extracted or skipped.");
+        System.out.println();
         System.out.println("Examples:");
-        System.out.println("  ZipExtractor ~/Downloads/drive-stuff");
-        System.out.println("  ZipExtractor ~/Downloads/drive-stuff --dry-run");
-        System.out.println("  ZipExtractor ~/Downloads/drive-stuff --threads 4");
-        System.out.println("  ZipExtractor ~/Downloads/drive-download-20260503T145811Z-3-007.zip");
-        System.out.println("  ZipExtractor ~/Downloads/drive-stuff --pattern \"backup-\\d{4}-part\\d+\\.zip\"");
+        System.out.println("  ZipExtractor \"G:\\My Drive\\Games\\W Fantasy\"");
+        System.out.println("  ZipExtractor \"G:\\My Drive\\Games\\W Fantasy\" --dry-run");
+        System.out.println("  ZipExtractor \"G:\\My Drive\\Games\\W Fantasy\" --threads 4");
+        System.out.println("  ZipExtractor drive-download-20260503T145811Z-3-007.zip");
         System.out.println();
         System.out.println("Default pattern matches files like:");
         System.out.println("  drive-download-20260503T145811Z-3-001.zip");
