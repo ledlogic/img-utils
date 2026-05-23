@@ -1,5 +1,7 @@
 package com.github.ledlogic.webp;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,6 +21,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.MemoryCacheImageInputStream;
 
 public class HarImageApp {
 
@@ -75,6 +80,30 @@ public class HarImageApp {
         } catch (Exception e) {
             return String.format("%04d_image.jpg", index);
         }
+    }
+
+    /**
+     * Returns {width, height} of a JPEG byte array using ImageIO header-only reading
+     * (does not decode the full image). Returns {-1, -1} if dimensions cannot be read.
+     */
+    static int[] getImageDimensions(byte[] bytes) {
+        try (MemoryCacheImageInputStream iis =
+                new MemoryCacheImageInputStream(new ByteArrayInputStream(bytes))) {
+            ImageReader reader = ImageIO.getImageReadersByFormatName("jpeg").next();
+            reader.setInput(iis, true, true);
+            int w = reader.getWidth(0);
+            int h = reader.getHeight(0);
+            reader.dispose();
+            return new int[]{w, h};
+        } catch (IOException | java.util.NoSuchElementException e) {
+            return new int[]{-1, -1};
+        }
+    }
+
+    /** Returns true if the image bytes have at least one dimension > 2000px. */
+    static boolean isLargeEnough(byte[] bytes) {
+        int[] dim = getImageDimensions(bytes);
+        return dim[0] > 2000 || dim[1] > 2000;
     }
 
     public static void main(String[] args) throws Exception {
@@ -141,6 +170,11 @@ public class HarImageApp {
                 String b64 = b64list.get(i)[1].replaceAll("\\s+", "");
                 try {
                     byte[] bytes = Base64.getDecoder().decode(b64);
+                    if (!isLargeEnough(bytes)) {
+                        int[] dim = getImageDimensions(bytes);
+                        if (verbose) System.out.printf("  [base64] SMALL %dx%d, skipped entry %d%n", dim[0], dim[1], i);
+                        continue;
+                    }
                     Path dest = outputDir.resolve(String.format("b64_%04d.jpg", i + 1));
                     Files.write(dest, bytes);
                     savedBase64++;
@@ -167,9 +201,10 @@ public class HarImageApp {
                 .build();
 
         ExecutorService pool = Executors.newFixedThreadPool(threads);
-        AtomicInteger ok      = new AtomicInteger();
-        AtomicInteger failedC = new AtomicInteger();
-        AtomicInteger skipped = new AtomicInteger();
+        AtomicInteger ok       = new AtomicInteger();
+        AtomicInteger failedC  = new AtomicInteger();
+        AtomicInteger skipped  = new AtomicInteger();
+        AtomicInteger filtered = new AtomicInteger(); // too small (<= 2000px on both axes)
         List<Future<?>> futures = new ArrayList<>();
 
         for (int idx = 0; idx < finalJpegUrls.size(); idx++) {
@@ -190,10 +225,18 @@ public class HarImageApp {
                             .GET().build();
                     HttpResponse<byte[]> resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray());
                     if (resp.statusCode() == 200) {
-                        Files.write(dest, resp.body());
+                        byte[] body = resp.body();
+                        if (!isLargeEnough(body)) {
+                            int[] dim = getImageDimensions(body);
+                            filtered.incrementAndGet();
+                            if (finalVerbose)
+                                System.out.printf("  [SMALL] %dx%d, deleted — %s%n", dim[0], dim[1], filename);
+                            return; // don't write; file was never created
+                        }
+                        Files.write(dest, body);
                         int n = ok.incrementAndGet();
                         if (finalVerbose)
-                            System.out.printf("  [OK]    %s (%,d bytes)%n", filename, resp.body().length);
+                            System.out.printf("  [OK]    %s (%,d bytes)%n", filename, body.length);
                         else
                             System.out.printf("  [%4d/%d] %s%n", n, finalJpegUrls.size(), filename);
                     } else {
@@ -215,6 +258,7 @@ public class HarImageApp {
 
         System.out.println("\n=== Summary ===");
         System.out.printf("  Downloaded : %d%n", ok.get());
+        System.out.printf("  Too small  : %d  (width <= 2000px and height <= 2000px, not saved)%n", filtered.get());
         System.out.printf("  Failed     : %d%n", failedC.get());
         System.out.printf("  Skipped    : %d%n", skipped.get());
         if (alsoResponse) System.out.printf("  Base64 saved: %d%n", savedBase64);
