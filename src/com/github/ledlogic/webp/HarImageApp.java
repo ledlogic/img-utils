@@ -100,10 +100,10 @@ public class HarImageApp {
         }
     }
 
-    /** Returns true if the image bytes have at least one dimension > 2000px. */
+    /** Returns true if the image bytes have at least one dimension > 1000px. */
     static boolean isLargeEnough(byte[] bytes) {
         int[] dim = getImageDimensions(bytes);
-        return dim[0] > 2000 || dim[1] > 2000;
+        return dim[0] > 1000 || dim[1] > 1000;
     }
 
     public static void main(String[] args) throws Exception {
@@ -204,7 +204,7 @@ public class HarImageApp {
         AtomicInteger ok       = new AtomicInteger();
         AtomicInteger failedC  = new AtomicInteger();
         AtomicInteger skipped  = new AtomicInteger();
-        AtomicInteger filtered = new AtomicInteger(); // too small (<= 2000px on both axes)
+        AtomicInteger filtered = new AtomicInteger(); // too small (<= 1000px on both axes)
         List<Future<?>> futures = new ArrayList<>();
 
         for (int idx = 0; idx < finalJpegUrls.size(); idx++) {
@@ -258,7 +258,7 @@ public class HarImageApp {
 
         System.out.println("\n=== Summary ===");
         System.out.printf("  Downloaded : %d%n", ok.get());
-        System.out.printf("  Too small  : %d  (width <= 2000px and height <= 2000px, not saved)%n", filtered.get());
+        System.out.printf("  Too small  : %d  (width <= 1000px and height <= 1000px, not saved)%n", filtered.get());
         System.out.printf("  Failed     : %d%n", failedC.get());
         System.out.printf("  Skipped    : %d%n", skipped.get());
         if (alsoResponse) System.out.printf("  Base64 saved: %d%n", savedBase64);
