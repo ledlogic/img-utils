@@ -19,8 +19,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.MemoryCacheImageInputStream;
@@ -82,10 +85,6 @@ public class HarImageApp {
         }
     }
 
-    /**
-     * Returns {width, height} of a JPEG byte array using ImageIO header-only reading
-     * (does not decode the full image). Returns {-1, -1} if dimensions cannot be read.
-     */
     static int[] getImageDimensions(byte[] bytes) {
         try (MemoryCacheImageInputStream iis =
                 new MemoryCacheImageInputStream(new ByteArrayInputStream(bytes))) {
@@ -100,45 +99,86 @@ public class HarImageApp {
         }
     }
 
-    /** Returns true if the image bytes have at least one dimension > 1000px. */
     static boolean isLargeEnough(byte[] bytes) {
         int[] dim = getImageDimensions(bytes);
         return dim[0] > 1000 || dim[1] > 1000;
     }
 
-    public static void main(String[] args) throws Exception {
-        if (args.length == 0 || args[0].equals("--help") || args[0].equals("-h")) {
-            printHelp(); System.exit(0);
+    // ── Derive the output directory name from a HAR file path ─────────────────
+    static String harBaseName(Path harFile) {
+        return harFile.getFileName().toString()
+                .replaceAll("\\.[Hh][Aa][Rr]$", "")
+                .replaceAll("[^a-zA-Z0-9._\\-]", "_");
+    }
+
+    static Path outputDirForHar(Path harFile, String outputBase) {
+        return Paths.get(outputBase, harBaseName(harFile) + "_images");
+    }
+
+    // Normalize a path argument: strip any surrounding quotes, stray quotes,
+    // and trailing backslashes that Windows cmd/PowerShell can inject.
+    static String cleanPath(String s) {
+        if (s == null) return s;
+        s = s.replace("\"", "").trim();   // remove ALL quote characters
+        while (s.endsWith("\\") || s.endsWith("/"))
+            s = s.substring(0, s.length() - 1);  // remove trailing separators
+        return s;
+    }
+
+    // ── Collect HAR files to process ──────────────────────────────────────────
+    static List<Path> collectHarFiles(String harPath, String outputBase) throws IOException {
+        harPath    = cleanPath(harPath);
+        outputBase = cleanPath(outputBase);
+        Path p = Paths.get(harPath);
+        if (!Files.exists(p)) {
+            System.err.println("ERROR: Path not found: " + harPath);
+            System.exit(1);
         }
 
-        String harPath      = args[0];
-        int    threads      = 4;
-        int    timeoutSecs  = 30;
-        String outputBase   = ".";
-        boolean alsoResponse = false;
-        boolean verbose      = false;
+        List<Path> harFiles = new ArrayList<>();
 
-        for (int i = 1; i < args.length; i++) {
-            switch (args[i]) {
-                case "--threads":      threads     = Integer.parseInt(args[++i]); break;
-                case "--timeout":      timeoutSecs = Integer.parseInt(args[++i]); break;
-                case "--output-dir":   outputBase  = args[++i]; break;
-                case "--also-response": alsoResponse = true; break;
-                case "--verbose":      verbose = true; break;
-                default:
-                    System.err.println("Unknown option: " + args[i]);
-                    printHelp(); System.exit(1);
+        if (Files.isDirectory(p)) {
+            // Gather all *.har files in the folder (non-recursive)
+            try (Stream<Path> stream = Files.list(p)) {
+                List<Path> all = stream
+                        .filter(f -> Files.isRegularFile(f))
+                        .filter(f -> f.getFileName().toString().toLowerCase().endsWith(".har"))
+                        .sorted()
+                        .collect(Collectors.toList());
+                for (Path harFile : all) {
+                    Path outDir = outputDirForHar(harFile, outputBase);
+                    if (Files.exists(outDir)) {
+                        System.out.printf("  [SKIP]  %s  (output dir already exists: %s)%n",
+                                harFile.getFileName(), outDir.getFileName());
+                    } else {
+                        harFiles.add(harFile);
+                    }
+                }
             }
+            if (harFiles.isEmpty()) {
+                System.out.println("No new HAR files to process in: " + p.toAbsolutePath());
+                System.exit(0);
+            }
+            System.out.printf("%nFound %d HAR file(s) to process.%n%n", harFiles.size());
+        } else {
+            // Single file — check if already processed
+            Path outDir = outputDirForHar(p, outputBase);
+            if (Files.exists(outDir)) {
+                System.out.printf("Output directory already exists: %s%n", outDir.toAbsolutePath());
+                System.out.printf("To re-process, delete that directory first.%n");
+                System.exit(0);
+            }
+            harFiles.add(p);
         }
 
-        Path harFile = Paths.get(harPath);
-        if (!Files.exists(harFile)) {
-            System.err.println("ERROR: File not found: " + harPath); System.exit(1);
-        }
+        return harFiles;
+    }
 
-        String harBaseName = harFile.getFileName().toString()
-                .replaceAll("\\.[Hh][Aa][Rr]$", "").replaceAll("[^a-zA-Z0-9._\\-]", "_");
-        Path outputDir = Paths.get(outputBase, harBaseName + "_images");
+    // ── Process a single HAR file ──────────────────────────────────────────────
+    static void processHar(Path harFile, String outputBase, int threads, int timeoutSecs,
+                           boolean alsoResponse, boolean verbose) throws Exception {
+
+        Path outputDir = outputDirForHar(harFile, outputBase);
         Files.createDirectories(outputDir);
 
         System.out.println("=== HAR Image Downloader ===");
@@ -186,14 +226,17 @@ public class HarImageApp {
         }
 
         if (jpegUrls.isEmpty() && savedBase64 == 0) {
-            System.out.println("\nNo JPEG images found in this HAR file."); System.exit(0);
+            System.out.println("\nNo JPEG images found in this HAR file.");
+            // Remove the empty output dir we just created
+            Files.deleteIfExists(outputDir);
+            return;
         }
 
-        System.out.printf("%nDownloading %d image(s)...%n%n", jpegUrls.size());
+        System.out.printf("%nDownloading %d image(s) — Pass 1: large images (>1000px)...%n%n", jpegUrls.size());
 
-        final int finalTimeout = timeoutSecs;
-        final boolean finalVerbose = verbose;
-        final List<String> finalJpegUrls = jpegUrls;
+        final int finalTimeout       = timeoutSecs;
+        final boolean finalVerbose   = verbose;
+        final List<String> finalUrls = jpegUrls;
 
         HttpClient client = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.ALWAYS)
@@ -204,12 +247,16 @@ public class HarImageApp {
         AtomicInteger ok       = new AtomicInteger();
         AtomicInteger failedC  = new AtomicInteger();
         AtomicInteger skipped  = new AtomicInteger();
-        AtomicInteger filtered = new AtomicInteger(); // too small (<= 1000px on both axes)
+        AtomicInteger filtered = new AtomicInteger();
         List<Future<?>> futures = new ArrayList<>();
 
-        for (int idx = 0; idx < finalJpegUrls.size(); idx++) {
-            final int i   = idx;
-            final String url = finalJpegUrls.get(i);
+        // Collect small images in case we need a fallback pass
+        // key = url, value = {bytes, maxDim}
+        ConcurrentHashMap<String, Object[]> smallImages = new ConcurrentHashMap<>();
+
+        for (int idx = 0; idx < finalUrls.size(); idx++) {
+            final int i      = idx;
+            final String url = finalUrls.get(i);
             futures.add(pool.submit(() -> {
                 String filename = urlToFilename(url, i + 1);
                 Path dest = outputDir.resolve(filename);
@@ -226,19 +273,23 @@ public class HarImageApp {
                     HttpResponse<byte[]> resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray());
                     if (resp.statusCode() == 200) {
                         byte[] body = resp.body();
+                        int[] dim = getImageDimensions(body);
                         if (!isLargeEnough(body)) {
-                            int[] dim = getImageDimensions(body);
                             filtered.incrementAndGet();
                             if (finalVerbose)
-                                System.out.printf("  [SMALL] %dx%d, deleted — %s%n", dim[0], dim[1], filename);
-                            return; // don't write; file was never created
+                                System.out.printf("  [SMALL] %dx%d — %s%n", dim[0], dim[1], filename);
+                            // Store for potential fallback; track max dimension
+                            int maxDim = Math.max(dim[0], dim[1]);
+                            if (maxDim > 0)
+                                smallImages.put(url, new Object[]{body, maxDim, filename});
+                            return;
                         }
                         Files.write(dest, body);
                         int n = ok.incrementAndGet();
                         if (finalVerbose)
                             System.out.printf("  [OK]    %s (%,d bytes)%n", filename, body.length);
                         else
-                            System.out.printf("  [%4d/%d] %s%n", n, finalJpegUrls.size(), filename);
+                            System.out.printf("  [%4d/%d] %s%n", n, finalUrls.size(), filename);
                     } else {
                         failedC.incrementAndGet();
                         System.out.printf("  [FAIL]  HTTP %d — %s%n", resp.statusCode(), url);
@@ -256,18 +307,95 @@ public class HarImageApp {
         }
         pool.shutdown();
 
+        // ── Fallback pass: if no large images saved, use the largest small ones ──
+        int fallbackSaved = 0;
+        if (ok.get() == 0 && !smallImages.isEmpty()) {
+            // Find the maximum dimension across all small images
+            int bestDim = smallImages.values().stream()
+                    .mapToInt(v -> (int) v[1])
+                    .max().orElse(0);
+            System.out.printf("%nNo large images found. Falling back to best available size (%dpx).%n", bestDim);
+            System.out.printf("Pass 2: saving %dpx images...%n%n", bestDim);
+
+            int fallbackIdx = 1;
+            for (Object[] entry : smallImages.values()) {
+                byte[] body     = (byte[]) entry[0];
+                int    maxDim   = (int)    entry[1];
+                String filename = (String) entry[2];
+                if (maxDim < bestDim) continue; // only save the best size tier
+                Path dest = outputDir.resolve(filename);
+                if (!Files.exists(dest)) {
+                    Files.write(dest, body);
+                    fallbackSaved++;
+                    System.out.printf("  [FALLBACK %d] %s%n", fallbackIdx++, filename);
+                }
+            }
+        }
+
         System.out.println("\n=== Summary ===");
-        System.out.printf("  Downloaded : %d%n", ok.get());
-        System.out.printf("  Too small  : %d  (width <= 1000px and height <= 1000px, not saved)%n", filtered.get());
-        System.out.printf("  Failed     : %d%n", failedC.get());
-        System.out.printf("  Skipped    : %d%n", skipped.get());
-        if (alsoResponse) System.out.printf("  Base64 saved: %d%n", savedBase64);
-        System.out.println("  Output dir : " + outputDir.toAbsolutePath());
+        System.out.printf("  Downloaded   : %d%n", ok.get());
+        if (fallbackSaved > 0)
+            System.out.printf("  Fallback saved: %d  (best available size, no >1000px images found)%n", fallbackSaved);
+        System.out.printf("  Too small    : %d  (filtered in pass 1)%n", filtered.get());
+        System.out.printf("  Failed       : %d%n", failedC.get());
+        System.out.printf("  Skipped      : %d%n", skipped.get());
+        if (alsoResponse) System.out.printf("  Base64 saved : %d%n", savedBase64);
+        System.out.println("  Output dir   : " + outputDir.toAbsolutePath());
+        System.out.println();
+    }
+
+    // ── main ──────────────────────────────────────────────────────────────────
+    public static void main(String[] args) throws Exception {
+        if (args.length == 0 || args[0].equals("--help") || args[0].equals("-h")) {
+            printHelp(); System.exit(0);
+        }
+
+        String harPath      = args[0];
+        int    threads      = 4;
+        int    timeoutSecs  = 30;
+        String outputBase   = ".";
+        boolean alsoResponse = false;
+        boolean verbose      = false;
+
+        for (int i = 1; i < args.length; i++) {
+            switch (args[i]) {
+                case "--threads":       threads      = Integer.parseInt(args[++i]); break;
+                case "--timeout":       timeoutSecs  = Integer.parseInt(args[++i]); break;
+                case "--output-dir":    outputBase   = args[++i]; break;
+                case "--also-response": alsoResponse = true; break;
+                case "--verbose":       verbose      = true; break;
+                default:
+                    System.err.println("Unknown option: " + args[i]);
+                    printHelp(); System.exit(1);
+            }
+        }
+
+        harPath    = cleanPath(harPath);
+        outputBase = cleanPath(outputBase);
+        List<Path> harFiles = collectHarFiles(harPath, outputBase);
+
+        for (int i = 0; i < harFiles.size(); i++) {
+            Path harFile = harFiles.get(i);
+            if (harFiles.size() > 1) {
+                System.out.printf("─── [%d/%d] %s ───%n%n",
+                        i + 1, harFiles.size(), harFile.getFileName());
+            }
+            processHar(harFile, outputBase, threads, timeoutSecs, alsoResponse, verbose);
+        }
+
+        if (harFiles.size() > 1) {
+            System.out.printf("=== All done. Processed %d HAR file(s). ===%n", harFiles.size());
+        }
     }
 
     static void printHelp() {
         System.out.println("Usage:");
-        System.out.println("  java HarImageDownloader <file.har> [options]");
+        System.out.println("  java HarImageApp <file.har|folder> [options]");
+        System.out.println();
+        System.out.println("Arguments:");
+        System.out.println("  file.har   Process a single HAR file.");
+        System.out.println("  folder     Process all *.har files in the folder.");
+        System.out.println("             HAR files whose output directory already exists are skipped.");
         System.out.println();
         System.out.println("Options:");
         System.out.println("  --threads <n>        Parallel download threads (default: 4)");
@@ -276,8 +404,9 @@ public class HarImageApp {
         System.out.println("  --also-response      Also save base64-encoded JPEGs from response bodies");
         System.out.println("  --verbose            Print each URL and byte count");
         System.out.println();
-        System.out.println("Example:");
-        System.out.println("  java HarImageDownloader mysession.har --threads 8 --verbose");
-        System.out.println("  java HarImageDownloader archive.har --also-response --output-dir ~/Downloads");
+        System.out.println("Examples:");
+        System.out.println("  java HarImageApp mysession.har --threads 8 --verbose");
+        System.out.println("  java HarImageApp ./har-files/ --output-dir ~/Downloads");
+        System.out.println("  java HarImageApp ./har-files/ --output-dir ~/Downloads --also-response");
     }
 }
