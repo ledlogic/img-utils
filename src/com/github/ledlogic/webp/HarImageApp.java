@@ -104,6 +104,11 @@ public class HarImageApp {
         return dim[0] > 1000 || dim[1] > 1000;
     }
 
+    /** Returns true if the URL is a 720x720 preview image. */
+    static boolean is720(String url) {
+        return url.contains("720X720") || url.contains("720x720");
+    }
+
     // ── Derive the output directory name from a HAR file path ─────────────────
     static String harBaseName(Path harFile) {
         return harFile.getFileName().toString()
@@ -195,11 +200,21 @@ public class HarImageApp {
         List<String[]> allPairs = extractUrlMimePairs(harJson);
         List<String> jpegUrls = new ArrayList<>();
         for (String[] pair : allPairs) {
-            if (isJpegUrl(pair[0], pair[1])) jpegUrls.add(pair[0]);
+            if (!isJpegUrl(pair[0], pair[1])) continue;
+            String url = pair[0];
+            String lower = url.toLowerCase();
+            // Skip obvious UI thumbnails by size prefix or path segment
+            if (lower.contains("70x70") || lower.contains("70X70"))    continue;
+            if (lower.contains("230x230") || lower.contains("230X230")) continue;
+            if (lower.contains("/object/"))                              continue;
+            jpegUrls.add(url);
         }
         LinkedHashSet<String> seen = new LinkedHashSet<>(jpegUrls);
         jpegUrls = new ArrayList<>(seen);
-        System.out.println("found " + jpegUrls.size() + " unique JPEG URL(s)");
+        // Separate 720x720 URLs from the rest for reporting
+        long count720 = jpegUrls.stream().filter(u -> is720(u)).count();
+        System.out.printf("found %d unique JPEG URL(s) (%d are 720x720)%n",
+                jpegUrls.size(), count720);
 
         int savedBase64 = 0;
         if (alsoResponse) {
@@ -278,10 +293,12 @@ public class HarImageApp {
                             filtered.incrementAndGet();
                             if (finalVerbose)
                                 System.out.printf("  [SMALL] %dx%d — %s%n", dim[0], dim[1], filename);
-                            // Store for potential fallback; track max dimension
-                            int maxDim = Math.max(dim[0], dim[1]);
-                            if (maxDim > 0)
+                            // Only keep 720x720 images for fallback — skip other small sizes
+                            if (is720(url)) {
+                                int maxDim = Math.max(dim[0], dim[1]);
+                                if (maxDim <= 0) maxDim = body.length;
                                 smallImages.put(url, new Object[]{body, maxDim, filename});
+                            }
                             return;
                         }
                         Files.write(dest, body);
@@ -307,22 +324,22 @@ public class HarImageApp {
         }
         pool.shutdown();
 
-        // ── Fallback pass: if no large images saved, use the largest small ones ──
+        // ── Fallback pass: if no large images saved, save ALL small images ──────
         int fallbackSaved = 0;
+        System.out.printf("%nPass 1 complete: %d large saved, %d small collected.%n",
+                ok.get(), smallImages.size());
         if (ok.get() == 0 && !smallImages.isEmpty()) {
-            // Find the maximum dimension across all small images
+            // Find best available dimension for reporting
             int bestDim = smallImages.values().stream()
                     .mapToInt(v -> (int) v[1])
                     .max().orElse(0);
-            System.out.printf("%nNo large images found. Falling back to best available size (%dpx).%n", bestDim);
-            System.out.printf("Pass 2: saving %dpx images...%n%n", bestDim);
+            System.out.printf("%nNo large images found. Falling back — saving all %d small image(s) (%dpx).%n%n",
+                    smallImages.size(), bestDim);
 
             int fallbackIdx = 1;
             for (Object[] entry : smallImages.values()) {
                 byte[] body     = (byte[]) entry[0];
-                int    maxDim   = (int)    entry[1];
                 String filename = (String) entry[2];
-                if (maxDim < bestDim) continue; // only save the best size tier
                 Path dest = outputDir.resolve(filename);
                 if (!Files.exists(dest)) {
                     Files.write(dest, body);
