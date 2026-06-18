@@ -1,4 +1,4 @@
-package img;
+package com.github.ledlogic.imgutils;
 
 import java.io.*;
 import java.nio.file.*;

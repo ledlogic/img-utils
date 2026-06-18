@@ -1,4 +1,4 @@
-package img;
+package com.github.ledlogic.imgutils;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;

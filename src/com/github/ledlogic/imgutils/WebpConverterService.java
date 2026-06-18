@@ -1,4 +1,4 @@
-package img;
+package com.github.ledlogic.imgutils;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -7,9 +7,9 @@ import java.io.InputStreamReader;
 
 import org.apache.commons.io.FileUtils;
 
-public class HeicConverterService {
+public class WebpConverterService {
 	public static void convertWebFile(String inPath, String outPath) throws IOException, InterruptedException {
-		String[] cmd = { "magick", "\"" + inPath + "\"", "\"" + outPath + "\"" };
+		String[] cmd = { "dwebp", "\"" + inPath + "\"", "-o", "\"" + outPath + "\"" };
 		Process proc = Runtime.getRuntime().exec(cmd);
 		int exitVal = proc.waitFor();
 		System.out.println("Process exitValue: " + exitVal);
