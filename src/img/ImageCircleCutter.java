@@ -1,4 +1,4 @@
-package com.github.ledlogic.webp;
+package img;
 
 import java.awt.image.BufferedImage;
 import java.io.File;

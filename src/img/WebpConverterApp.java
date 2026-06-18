@@ -1,23 +1,18 @@
-package com.github.ledlogic.webp;
+package img;
 
 import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
-/**
- * Assumption, running on a system with image magick installed
- * Ex. install cygwin, install image magick
- * 
- * @see https://www.cygwin.com/install.html
- * @see https://imagemagick.org/script/download.php#windows
- */
-public class HeicConverterApp {
+import org.apache.commons.lang3.StringUtils;
+
+public class WebpConverterApp {
 	
-	private static HeicFilenameFilter filter = new HeicFilenameFilter();
+	private static WebpFilenameFilter filter = new WebpFilenameFilter();
 	
 	public static void main(String[] args) throws IOException, InterruptedException {
-		String attackFolder = "G:\\My Drive\\Ebay\\20250901";
+		String attackFolder = "G:\\My Drive\\Games\\Traveller\\Traveller Scenarios\\Traveller Solomani Rim\\05-Dingir Zone\\char-npcs";
 		File attackFolderFile = new File(attackFolder);
 		
 		File[] files = attackFolderFile.listFiles(filter);
@@ -25,16 +20,17 @@ public class HeicConverterApp {
 		String pattern = "yyyyMMddHHmm";
 		SimpleDateFormat simpleDateFormat = new SimpleDateFormat(pattern);
 		String date = simpleDateFormat.format(new Date());
+		boolean newNames = false;
 		
 		long cnt = 500;
 		for (File file: files) {
 			String inputFile = file.getName();
-			String outputFile = date + (cnt++) + ".png";			
+			String outputFile = (newNames ? date + (cnt++) : StringUtils.replace(file.getName(),".webp", "")) + ".png";			
 			
 			String inPath = attackFolder + "\\" + inputFile;
 			String outPath = attackFolder + "\\" + outputFile;
 			
-			HeicConverterService.convertWebFile(inPath, outPath);
+			WebpConverterService.convertWebFile(inPath, outPath);
 		}
 	}
 }

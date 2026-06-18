@@ -1,13 +1,13 @@
-package com.github.ledlogic.webp;
+package img;
 
 import java.io.File;
 import java.io.FilenameFilter;
 
-public class JpgFilenameFilter implements FilenameFilter {
+public class HeicFilenameFilter implements FilenameFilter {
 
 	@Override
 	public boolean accept(File dir, String name) {
-		boolean ret = name.endsWith("jpg");
+		boolean ret = name.toLowerCase().endsWith("heic");
 		return ret;
 	}
 

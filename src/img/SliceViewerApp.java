@@ -1,4 +1,4 @@
-package com.github.ledlogic.webp;
+package img;
 
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;

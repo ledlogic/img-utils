@@ -1,4 +1,4 @@
-package com.github.ledlogic.webp;
+package img;
 
 import java.io.File;
 import java.io.FilenameFilter;
