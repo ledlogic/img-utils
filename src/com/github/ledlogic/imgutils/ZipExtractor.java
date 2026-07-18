@@ -147,36 +147,45 @@ public class ZipExtractor {
 
     // ── Directory mode ────────────────────────────────────────────────────────
 
-    private static int processDirectory(Path dir, Pattern customPattern, int threads, boolean dryRun) {
-        Pattern matchPattern = customPattern != null ? customPattern : DEFAULT_PATTERN;
+    // Matches any .zip file — used as fallback when no Drive-pattern zips are found
+    private static final Pattern ANY_ZIP_PATTERN =
+            Pattern.compile("^.+\\.zip$", Pattern.CASE_INSENSITIVE);
 
+    private static int processDirectory(Path dir, Pattern customPattern, int threads, boolean dryRun) {
         System.out.println();
         info("Directory : " + dir.toAbsolutePath());
-        info("Pattern   : " + matchPattern.pattern());
         info("Threads   : " + threads
                 + "  (logical CPU cores available: " + Runtime.getRuntime().availableProcessors() + ")");
         System.out.println();
 
-        // Discover matching zips
+        // Discover matching zips — try Drive pattern first, fall back to any .zip
         List<Path> allZips;
-        try (Stream<Path> stream = Files.list(dir)) {
-            allZips = stream
-                    .filter(Files::isRegularFile)
-                    .filter(p -> matchPattern.matcher(p.getFileName().toString()).matches())
-                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
-                    .collect(Collectors.toList());
-        } catch (IOException e) {
-            err("Cannot list directory: " + e.getMessage());
-            return 1;
+        Pattern matchPattern;
+        if (customPattern != null) {
+            matchPattern = customPattern;
+            allZips = listZips(dir, matchPattern);
+            if (allZips == null) return 1;
+        } else {
+            matchPattern = DEFAULT_PATTERN;
+            allZips = listZips(dir, matchPattern);
+            if (allZips == null) return 1;
+            if (allZips.isEmpty()) {
+                info("No Google Drive split zips found — scanning for any .zip files...");
+                matchPattern = ANY_ZIP_PATTERN;
+                allZips = listZips(dir, matchPattern);
+                if (allZips == null) return 1;
+            }
         }
 
-        if (allZips.isEmpty()) { warn("No matching zip files found in " + dir); return 0; }
+        info("Pattern   : " + matchPattern.pattern());
 
-        // Group by prefix (everything before -NNN)
+        if (allZips.isEmpty()) { warn("No zip files found in " + dir); return 0; }
+
+        // Group by prefix for Drive files (everything before -NNN); one group per file otherwise
         Map<String, List<Path>> groups = new LinkedHashMap<>();
         for (Path zip : allZips) {
             Matcher m = DEFAULT_PATTERN.matcher(zip.getFileName().toString());
-            String key = m.matches() ? m.group(1) : "all";
+            String key = m.matches() ? m.group(1) : zip.getFileName().toString();
             groups.computeIfAbsent(key, k -> new ArrayList<>()).add(zip);
         }
 
@@ -233,6 +242,20 @@ public class ZipExtractor {
         info(String.format("Completed in %d s", elapsedSec));
         printSummary(totalExtracted.get(), totalSkipped.get(), totalDeleted.get(), errors.get(), allZips.size(), dryRun);
         return errors.get() > 0 ? 2 : 0;
+    }
+
+    /** Lists files in {@code dir} matching {@code pattern}, sorted by name. Returns null on I/O error. */
+    private static List<Path> listZips(Path dir, Pattern pattern) {
+        try (Stream<Path> stream = Files.list(dir)) {
+            return stream
+                    .filter(Files::isRegularFile)
+                    .filter(p -> pattern.matcher(p.getFileName().toString()).matches())
+                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
+                    .collect(Collectors.toList());
+        } catch (IOException e) {
+            err("Cannot list directory: " + e.getMessage());
+            return null;
+        }
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────────
